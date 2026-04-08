@@ -15,7 +15,7 @@ This project simulates a production-style fraud monitoring pipeline:
 ## Architecture
 
 ```text
-PaySim CSV
+PaySim CSV download : https://www.kaggle.com/datasets/mtalaltariq/paysim-data
    ↓
 Python Producer
    ↓
