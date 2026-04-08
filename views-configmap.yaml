@@ -1,0 +1,116 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: transaction-sql-init
+  namespace: transaction-fraud
+data:
+  views.sql: |
+    CREATE TABLE IF NOT EXISTS bank_transactions (
+        transaction_id TEXT,
+        simulation_step INTEGER,
+        event_time TIMESTAMP,
+        processed_at TIMESTAMP,
+        transaction_type TEXT,
+        amount DOUBLE PRECISION,
+        source_account TEXT,
+        destination_account TEXT,
+        old_balance_origin DOUBLE PRECISION,
+        new_balance_origin DOUBLE PRECISION,
+        old_balance_dest DOUBLE PRECISION,
+        new_balance_dest DOUBLE PRECISION,
+        fraud_label INTEGER,
+        flagged_fraud INTEGER,
+        is_suspicious TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS suspicious_transactions (
+        transaction_id TEXT,
+        simulation_step INTEGER,
+        event_time TIMESTAMP,
+        processed_at TIMESTAMP,
+        transaction_type TEXT,
+        amount DOUBLE PRECISION,
+        source_account TEXT,
+        destination_account TEXT,
+        fraud_label INTEGER,
+        flagged_fraud INTEGER,
+        suspicious_reason TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bank_transactions_event_time
+    ON bank_transactions (event_time);
+
+    CREATE INDEX IF NOT EXISTS idx_bank_transactions_transaction_type
+    ON bank_transactions (transaction_type);
+
+    CREATE INDEX IF NOT EXISTS idx_bank_transactions_is_suspicious
+    ON bank_transactions (is_suspicious);
+
+    CREATE INDEX IF NOT EXISTS idx_bank_transactions_fraud_label
+    ON bank_transactions (fraud_label);
+
+    CREATE INDEX IF NOT EXISTS idx_bank_transactions_event_time_type
+    ON bank_transactions (event_time, transaction_type);
+
+    CREATE OR REPLACE VIEW transaction_summary AS
+    SELECT
+        DATE(event_time) AS event_date,
+        transaction_type,
+        COUNT(*) AS total_transactions,
+        ROUND(SUM(amount)::numeric, 2) AS total_amount,
+        ROUND(AVG(amount)::numeric, 2) AS avg_amount,
+        ROUND(MIN(amount)::numeric, 2) AS min_amount,
+        ROUND(MAX(amount)::numeric, 2) AS max_amount,
+        SUM(CASE WHEN is_suspicious = 'Y' THEN 1 ELSE 0 END) AS suspicious_transactions,
+        ROUND(SUM(CASE WHEN is_suspicious = 'Y' THEN amount ELSE 0 END)::numeric, 2) AS suspicious_amount,
+        SUM(CASE WHEN fraud_label = 1 THEN 1 ELSE 0 END) AS fraud_transactions,
+        SUM(CASE WHEN flagged_fraud = 1 THEN 1 ELSE 0 END) AS flagged_fraud_transactions,
+        ROUND(
+            (SUM(CASE WHEN is_suspicious = 'Y' THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0)) * 100,
+            2
+        ) AS suspicious_rate_pct,
+        ROUND(
+            (SUM(CASE WHEN fraud_label = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0)) * 100,
+            2
+        ) AS fraud_rate_pct
+    FROM bank_transactions
+    GROUP BY DATE(event_time), transaction_type;
+
+    CREATE OR REPLACE VIEW transaction_summary_hourly AS
+    SELECT
+        DATE_TRUNC('hour', event_time) AS event_hour,
+        transaction_type,
+        COUNT(*) AS total_transactions,
+        ROUND(SUM(amount)::numeric, 2) AS total_amount,
+        ROUND(AVG(amount)::numeric, 2) AS avg_amount,
+        ROUND(MIN(amount)::numeric, 2) AS min_amount,
+        ROUND(MAX(amount)::numeric, 2) AS max_amount,
+        SUM(CASE WHEN is_suspicious = 'Y' THEN 1 ELSE 0 END) AS suspicious_transactions,
+        ROUND(SUM(CASE WHEN is_suspicious = 'Y' THEN amount ELSE 0 END)::numeric, 2) AS suspicious_amount,
+        SUM(CASE WHEN fraud_label = 1 THEN 1 ELSE 0 END) AS fraud_transactions,
+        SUM(CASE WHEN flagged_fraud = 1 THEN 1 ELSE 0 END) AS flagged_fraud_transactions,
+        ROUND(
+            (SUM(CASE WHEN is_suspicious = 'Y' THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0)) * 100,
+            2
+        ) AS suspicious_rate_pct,
+        ROUND(
+            (SUM(CASE WHEN fraud_label = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0)) * 100,
+            2
+        ) AS fraud_rate_pct
+    FROM bank_transactions
+    GROUP BY DATE_TRUNC('hour', event_time), transaction_type;
+
+    CREATE OR REPLACE VIEW suspicious_transaction_summary_hourly AS
+    SELECT
+        DATE_TRUNC('hour', event_time) AS event_hour,
+        transaction_type,
+        COUNT(*) AS suspicious_transactions,
+        ROUND(SUM(amount)::numeric, 2) AS suspicious_amount,
+        ROUND(AVG(amount)::numeric, 2) AS avg_suspicious_amount,
+        ROUND(MIN(amount)::numeric, 2) AS min_suspicious_amount,
+        ROUND(MAX(amount)::numeric, 2) AS max_suspicious_amount,
+        SUM(CASE WHEN fraud_label = 1 THEN 1 ELSE 0 END) AS fraud_transactions,
+        SUM(CASE WHEN flagged_fraud = 1 THEN 1 ELSE 0 END) AS flagged_fraud_transactions
+    FROM bank_transactions
+    WHERE is_suspicious = 'Y'
+    GROUP BY DATE_TRUNC('hour', event_time), transaction_type;

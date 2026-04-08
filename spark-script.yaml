@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-script
+  namespace: transaction-fraud
+data:
+  spark-stream.py: |
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import col, from_json, current_timestamp, to_timestamp, when
+    from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType
+
+    spark = SparkSession.builder.appName("bank-transaction-stream").getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
+
+    schema = StructType([
+        StructField("transaction_id", StringType(), True),
+        StructField("simulation_step", IntegerType(), True),
+        StructField("event_time", StringType(), True),
+        StructField("transaction_type", StringType(), True),
+        StructField("amount", DoubleType(), True),
+        StructField("source_account", StringType(), True),
+        StructField("destination_account", StringType(), True),
+        StructField("old_balance_origin", DoubleType(), True),
+        StructField("new_balance_origin", DoubleType(), True),
+        StructField("old_balance_dest", DoubleType(), True),
+        StructField("new_balance_dest", DoubleType(), True),
+        StructField("fraud_label", IntegerType(), True),
+        StructField("flagged_fraud", IntegerType(), True)
+    ])
+
+    df = (
+        spark.readStream
+        .format("kafka")
+        .option("kafka.bootstrap.servers", "kafka.transaction-fraud.svc.cluster.local:9092")
+        .option("subscribe", "transactions")
+        .option("startingOffsets", "latest")
+        .load()
+    )
+
+    json_df = df.selectExpr("CAST(value AS STRING) as json_string")
+
+    parsed_df = json_df.select(
+        from_json(col("json_string"), schema).alias("data")
+    )
+
+    result_df = parsed_df.select(
+        col("data.transaction_id").alias("transaction_id"),
+        col("data.simulation_step").alias("simulation_step"),
+        to_timestamp(col("data.event_time")).alias("event_time"),
+        current_timestamp().alias("processed_at"),
+        col("data.transaction_type").alias("transaction_type"),
+        col("data.amount").alias("amount"),
+        col("data.source_account").alias("source_account"),
+        col("data.destination_account").alias("destination_account"),
+        col("data.old_balance_origin").alias("old_balance_origin"),
+        col("data.new_balance_origin").alias("new_balance_origin"),
+        col("data.old_balance_dest").alias("old_balance_dest"),
+        col("data.new_balance_dest").alias("new_balance_dest"),
+        col("data.fraud_label").alias("fraud_label"),
+        col("data.flagged_fraud").alias("flagged_fraud"),
+        when(col("data.fraud_label") == 1, "FRAUD_LABEL=1")
+          .when(col("data.amount") > 100000, "AMOUNT_GT_100000")
+          .otherwise(None)
+          .alias("suspicious_reason"),
+        when(
+            (col("data.amount") > 100000) | (col("data.fraud_label") == 1),
+            "Y"
+        ).otherwise("N").alias("is_suspicious")
+    )
+
+    def write_df_to_postgres(df, table_name):
+        if df.isEmpty():
+            return
+
+        (
+            df.write
+            .format("jdbc")
+            .option("url", "jdbc:postgresql://postgres.transaction-fraud.svc.cluster.local:5432/transaction-fraud")
+            .option("dbtable", table_name)
+            .option("user", "admin")
+            .option("password", "admin")
+            .option("driver", "org.postgresql.Driver")
+            .mode("append")
+            .save()
+        )
+
+    def write_to_postgres(batch_df, batch_id):
+        if batch_df.isEmpty():
+            return
+
+        bank_df = batch_df.select(
+            "transaction_id",
+            "simulation_step",
+            "event_time",
+            "processed_at",
+            "transaction_type",
+            "amount",
+            "source_account",
+            "destination_account",
+            "old_balance_origin",
+            "new_balance_origin",
+            "old_balance_dest",
+            "new_balance_dest",
+            "fraud_label",
+            "flagged_fraud",
+            "is_suspicious"
+        )
+
+        suspicious_df = batch_df.filter(col("is_suspicious") == "Y").select(
+            "transaction_id",
+            "simulation_step",
+            "event_time",
+            "processed_at",
+            "transaction_type",
+            "amount",
+            "source_account",
+            "destination_account",
+            "fraud_label",
+            "flagged_fraud",
+            "suspicious_reason"
+        )
+
+        write_df_to_postgres(bank_df, "bank_transactions")
+        write_df_to_postgres(suspicious_df, "suspicious_transactions")
+
+    query = (
+        result_df.writeStream
+        .foreachBatch(write_to_postgres)
+        .outputMode("append")
+        .start()
+    )
+
+    query.awaitTermination()

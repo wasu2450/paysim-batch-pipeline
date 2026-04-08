@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-transaction-views
+  namespace: transaction-fraud
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: psql
+        image: postgres:16
+        env:
+        - name: PGPASSWORD
+          value: admin
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            until pg_isready -h postgres -p 5432 -U admin -d transaction-fraud; do
+              echo "Waiting for postgres..."
+              sleep 3
+            done
+            psql -v ON_ERROR_STOP=1 -h postgres -U admin -d transaction-fraud -f /sql/views.sql
+        volumeMounts:
+        - name: sql-volume
+          mountPath: /sql
+      volumes:
+      - name: sql-volume
+        configMap:
+          name: transaction-sql-init
